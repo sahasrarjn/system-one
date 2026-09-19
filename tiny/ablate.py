@@ -193,13 +193,145 @@ def main():
     args = ap.parse_args()
     t0 = time.time()
     tr = build(20000, 0); va = build(5000, 99)
-    which = args.only.split(",") if args.only else ["a1", "a2", "a3", "a4"]
+    which = args.only.split(",") if args.only else ["a1", "a2", "a3", "a4", "a5", "a6"]
     if "a1" in which: a1(tr, va)
     if "a2" in which: a2(tr, va)
     if "a3" in which: a3()
     if "a4" in which: a4(tr)
+    if "a5" in which: a5()
+    if "a6" in which: a6(tr, va)
     print(f"\n  total {time.time()-t0:.0f}s\n")
 
+
+
+# --------------------------------------------------------------------- A5
+def a5():
+    """The baseline the whole design has to beat."""
+    import time as _t
+    from tiny.model import FixedHeadClassifier
+    hdr("A5  fixed-head baseline — is the flexible design worth it?")
+    print("  same backbone, same loss, same seed. The only differences are that")
+    print("  the options leave the input and the head becomes d -> k.\n")
+
+    C = len(D.CATEGORIES)
+    tr = build(20000, 0); va = build(5000, 99)
+    slot = score(train(tr, "soft", "block"), va)
+
+    # doc-only tensors for the plain classifier
+    def docs(n, seed):
+        ds = D.make_dataset(n, seed=seed)
+        X = torch.tensor([list(d[:D.MAX_DOC]) + [D.PAD_ID]*(D.MAX_DOC-len(d[:D.MAX_DOC]))
+                          for d, _, _ in ds])
+        return X, torch.tensor([y for _, y, _ in ds]), \
+               torch.tensor([p for _, _, p in ds], dtype=torch.float)
+
+    Xtr, Ytr, Ptr = docs(20000, 0); Xva, Yva, Pva = docs(5000, 99)
+    torch.manual_seed(1); random.seed(1)
+    fh = FixedHeadClassifier(D.VOCAB_SIZE, C)
+    opt = torch.optim.AdamW(fh.parameters(), lr=3e-3, weight_decay=0.01)
+    n, bs = len(Xtr), 128
+    sch = torch.optim.lr_scheduler.OneCycleLR(opt, 3e-3, total_steps=(n//bs)*10)
+    for _ in range(10):
+        perm = torch.randperm(n)
+        for i in range(0, n-bs+1, bs):
+            b = perm[i:i+bs]
+            logp = fh(Xtr[b]).log_softmax(-1); p = logp.exp()
+            ce = -(Ptr[b]*logp).sum(-1).mean()
+            oh = F.one_hot(Ptr[b].argmax(-1), C).float()
+            (ce + 0.3*((p-oh)**2).sum(-1).mean()).backward()
+            torch.nn.utils.clip_grad_norm_(fh.parameters(), 1.0)
+            opt.step(); sch.step(); opt.zero_grad(set_to_none=True)
+    with torch.no_grad():
+        pf = fh(Xva).softmax(-1); pred = pf.argmax(-1)
+    fixed = dict(acc=(pred==Yva).float().mean().item(),
+                 l1=(pf-Pva).abs().sum(-1).mean().item(),
+                 ece=ece(pf.max(-1).values.numpy(), (pred==Yva).float().numpy()))
+
+    # per-call latency, batch 1
+    def lat(fn, *a, reps=300):
+        with torch.no_grad():
+            for _ in range(30): fn(*a)
+            t0 = _t.time()
+            for _ in range(reps): fn(*a)
+        return (_t.time()-t0)/reps*1000
+    sm = train(tr, "soft", "block")
+    X1, ns1, S1, _, _, _ = va
+    l_slot  = lat(lambda: sm(X1[:1], ns1, S1[:1]))
+    l_fixed = lat(lambda: fh(Xva[:1]))
+
+    n_slot  = sum(p.numel() for p in sm.parameters())
+    n_fixed = sum(p.numel() for p in fh.parameters())
+    print(f"  {'':26}{'slot head':>13}{'fixed head':>13}")
+    for lab, a, b in [("accuracy", slot['acc'], fixed['acc']),
+                      ("ECE", slot['ece'], fixed['ece']),
+                      ("L1 to true posterior", slot['l1'], fixed['l1'])]:
+        print(f"  {lab:26}{a:>13.4f}{b:>13.4f}")
+    print(f"  {'Bayes ceiling':26}{D.bayes_ceiling(va[5]):>13.4f}{'':>13}")
+    print(f"  {'sequence length':26}{D.MAX_DOC+len(D.CATEGORIES):>13}{D.MAX_DOC:>13}")
+    print(f"  {'latency per call (ms)':26}{l_slot:>13.3f}{l_fixed:>13.3f}")
+    print(f"  {'total parameters':26}{n_slot:>13,}{n_fixed:>13,}")
+    print(f"  {'option sets per call':26}{'any':>13}{'fixed':>13}")
+    print(f"\n  fixed head is {l_slot/l_fixed:.2f}x faster per call")
+
+
+# --------------------------------------------------------------------- A6
+def a6(tr, va):
+    """Order sensitivity is a positional artefact. Remove the position
+    difference between option slots and it should vanish, not shrink."""
+    hdr("A6  fixing option-order sensitivity")
+    print("  shuffling training data removed the model's INCENTIVE to key on")
+    print("  slot position. It never removed its ABILITY to: each slot still")
+    print("  carries a different position embedding. So give them all the same one.\n")
+    C = len(D.CATEGORIES)
+    X, ns, S, Y, P, raw = va
+
+    def order_sensitivity(model, R=6):
+        shifts, flips = [], []
+        with torch.no_grad():
+            base = model(X, ns, S).softmax(-1)
+            for _ in range(R):
+                q = torch.randperm(C)
+                Xp = X.clone(); Xp[:, ns:] = Xp[:, ns:][:, q]
+                pp = model(Xp, ns, S).softmax(-1)
+                inv = torch.empty_like(q); inv[q] = torch.arange(C)
+                pp = pp[:, inv]
+                shifts.append((pp - base).abs().sum(-1).mean().item())
+                flips.append((pp.argmax(-1) != base.argmax(-1)).float().mean().item())
+        return float(np.mean(shifts)), float(np.mean(flips))
+
+    def build_train(shared, shuf):
+        torch.manual_seed(1); random.seed(1)
+        Xt, nst, St, Yt, Pt, _ = tr
+        m = TinySystemOne(D.VOCAB_SIZE, mask_mode="block", shared_opt_pos=shared)
+        opt = torch.optim.AdamW(m.parameters(), lr=3e-3, weight_decay=0.01)
+        n, bs = len(Xt), 128
+        sch = torch.optim.lr_scheduler.OneCycleLR(opt, 3e-3, total_steps=(n//bs)*10)
+        for _ in range(10):
+            perm = torch.randperm(n)
+            for i in range(0, n-bs+1, bs):
+                b = perm[i:i+bs]
+                xb, sb, tb = Xt[b], St[b], Pt[b]
+                if shuf:
+                    q = torch.randperm(C)
+                    xb = xb.clone(); xb[:, nst:] = xb[:, nst:][:, q]; tb = tb[:, q]
+                logp = m(xb, nst, sb).log_softmax(-1); p = logp.exp()
+                ce = -(tb*logp).sum(-1).mean()
+                oh = F.one_hot(tb.argmax(-1), C).float()
+                (ce + 0.3*((p-oh)**2).sum(-1).mean()).backward()
+                torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
+                opt.step(); sch.step(); opt.zero_grad(set_to_none=True)
+        return m
+
+    print(f"  {'setup':<40}{'L1 shift':>11}{'flips':>9}{'acc':>9}{'ECE':>9}")
+    for shared, shuf, lab in [(False, False, "per-slot positions, fixed order"),
+                              (False, True,  "per-slot positions, shuffled"),
+                              (True,  False, "SHARED position, fixed order"),
+                              (True,  True,  "SHARED position, shuffled")]:
+        m = build_train(shared, shuf)
+        sh, fl = order_sensitivity(m)
+        r = score(m, va)
+        print(f"  {lab:<40}{sh:>11.4f}{fl:>8.1%}{r['acc']:>9.4f}{r['ece']:>9.4f}")
+    print(f"\n  ceiling {D.bayes_ceiling(raw):.4f}. 0.0000 / 0.0% is exact order-invariance.")
 
 if __name__ == "__main__":
     main()

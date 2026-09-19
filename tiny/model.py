@@ -85,9 +85,15 @@ class Block(nn.Module):
 class TinySystemOne(nn.Module):
     """Encoder + slot head. No lm_head, no decoding, no generation loop."""
 
-    def __init__(self, vocab, d=64, depth=4, heads=4, max_len=64, mask_mode="block"):
+    def __init__(self, vocab, d=64, depth=4, heads=4, max_len=64, mask_mode="block",
+                 shared_opt_pos=False):
         super().__init__()
         self.mask_mode = mask_mode
+        # Give every option slot the SAME position embedding. The slots then
+        # differ only by their content, so permuting the options permutes the
+        # scores and changes nothing else: order-invariance by construction,
+        # rather than by hoping training teaches it.
+        self.shared_opt_pos = shared_opt_pos
         self.tok = nn.Embedding(vocab, d)
         self.pos = nn.Embedding(max_len, d)
         self.blocks = nn.ModuleList([Block(d, heads) for _ in range(depth)])
@@ -99,7 +105,11 @@ class TinySystemOne(nn.Module):
 
     def encode(self, ids, n_state):
         B, T = ids.shape
-        x = self.tok(ids) + self.pos(torch.arange(T, device=ids.device))[None]
+        pos_ids = torch.arange(T, device=ids.device)
+        if self.shared_opt_pos:
+            pos_ids = pos_ids.clone()
+            pos_ids[n_state:] = n_state          # every option slot, one position
+        x = self.tok(ids) + self.pos(pos_ids)[None]
         allow = make_allow(self.mask_mode, n_state, T, ids.device)[None].expand(B, T, T)
         for blk in self.blocks:
             x = blk(x, allow)
@@ -119,3 +129,31 @@ def confidence(p: torch.Tensor) -> torch.Tensor:
     k = p.shape[-1]
     H = -(p.clamp_min(1e-12) * p.clamp_min(1e-12).log()).sum(-1)
     return 1.0 - H / math.log(k)
+
+
+class FixedHeadClassifier(nn.Module):
+    """The ordinary alternative, for comparison.
+
+    Same embeddings, same blocks, same depth. Two differences:
+      - the answer options are NOT in the input, so the sequence is shorter
+      - one d -> k head on a pooled document vector, so k is fixed at build time
+
+    This is what you would write if your label set never changed. It is the
+    baseline the System One design has to justify itself against.
+    """
+
+    def __init__(self, vocab, n_classes, d=64, depth=4, heads=4, max_len=64):
+        super().__init__()
+        self.tok = nn.Embedding(vocab, d)
+        self.pos = nn.Embedding(max_len, d)
+        self.blocks = nn.ModuleList([Block(d, heads) for _ in range(depth)])
+        self.ln = nn.LayerNorm(d)
+        self.head = nn.Linear(d, n_classes)      # d -> k, fixed
+
+    def forward(self, ids):
+        B, T = ids.shape
+        x = self.tok(ids) + self.pos(torch.arange(T, device=ids.device))[None]
+        allow = torch.ones(T, T, dtype=torch.bool, device=ids.device)[None].expand(B, T, T)
+        for blk in self.blocks:
+            x = blk(x, allow)
+        return self.head(self.ln(x).mean(1))     # mean-pool the document
