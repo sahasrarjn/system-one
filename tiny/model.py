@@ -13,6 +13,24 @@ import torch.nn.functional as F
 
 
 # ---------------------------------------------------------------- the mask
+def make_allow(mode: str, n_state: int, n_total: int, device=None) -> torch.Tensor:
+    """Three mask variants, for the ablation.
+
+      block  - ours. state self-contained; suffix bidirectional, sees state.
+      causal - a normal LM mask. option j sees only options 1..j.
+      full   - everything sees everything. Strictly more information than
+               `block`, but the state now depends on the question, so nothing
+               can be cached. If block ~= full, cacheability is free.
+    """
+    if mode == "block":
+        return block_allow(n_state, n_total, device)
+    if mode == "causal":
+        return torch.tril(torch.ones(n_total, n_total, dtype=torch.bool, device=device))
+    if mode == "full":
+        return torch.ones(n_total, n_total, dtype=torch.bool, device=device)
+    raise ValueError(mode)
+
+
 def block_allow(n_state: int, n_total: int, device=None) -> torch.Tensor:
     """The one idea that makes 'encode once, answer N questions' work.
 
@@ -67,8 +85,9 @@ class Block(nn.Module):
 class TinySystemOne(nn.Module):
     """Encoder + slot head. No lm_head, no decoding, no generation loop."""
 
-    def __init__(self, vocab, d=64, depth=4, heads=4, max_len=64):
+    def __init__(self, vocab, d=64, depth=4, heads=4, max_len=64, mask_mode="block"):
         super().__init__()
+        self.mask_mode = mask_mode
         self.tok = nn.Embedding(vocab, d)
         self.pos = nn.Embedding(max_len, d)
         self.blocks = nn.ModuleList([Block(d, heads) for _ in range(depth)])
@@ -81,7 +100,7 @@ class TinySystemOne(nn.Module):
     def encode(self, ids, n_state):
         B, T = ids.shape
         x = self.tok(ids) + self.pos(torch.arange(T, device=ids.device))[None]
-        allow = block_allow(n_state, T, ids.device)[None].expand(B, T, T)
+        allow = make_allow(self.mask_mode, n_state, T, ids.device)[None].expand(B, T, T)
         for blk in self.blocks:
             x = blk(x, allow)
         return self.ln(x)
