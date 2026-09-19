@@ -1,0 +1,7 @@
+torch>=2.4
+transformers>=4.51
+datasets>=2.19
+pandas>=2.0
+numpy>=1.26
+pytest>=8.0
+matplotlib>=3.8   # optional, only for --plot
