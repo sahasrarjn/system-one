@@ -71,6 +71,67 @@ questions with different arity: 0.5 is decisive in a binary and near-uniform
 across ten options. Normalised entropy is k-invariant, which matters the moment
 one threshold routes every question type.
 
+## The vision arm (`vision/`)
+
+The same technique on a vision-language model. Nothing about the surgery
+changes: a VLM turns pixels into tokens before the language model sees
+anything, and the block mask, the slot head, the loss and the metrics are all
+imported unchanged from the text pipeline above. Only the packing differs.
+
+    python scripts/vision_run.py cache --split trainval --limit 2000
+    python scripts/vision_run.py cache --split test     --limit 1500
+    python scripts/vision_run.py train
+
+**The experiment.** Oxford-IIIT Pets, 37 breeds, reshaped into questions whose
+option list changes per call. Three question modes, each testing something
+different:
+
+| mode | option set | what it tests |
+|---|---|---|
+| `random` | true breed + uniform distractors | the easy case |
+| `confusable` | true breed + distractors of the same species | whether options seeing each other helps |
+| `abstain` | true breed REMOVED, `none of these` correct | a claim about the option set as a whole |
+
+**The comparison.** Both arms train a small head on frozen features, so the
+difference is wiring rather than budget:
+
+* **cross-encoder** — option tokens go through the language model alongside the
+  image and attend into it at every layer. A shared `d → 1` probe reads each
+  option position. 2,049 parameters.
+* **bi-encoder** — SigLIP-2 embeds the image and each label separately and they
+  meet once at a dot product, which is how open-vocabulary classification
+  already works. Gets a trained temperature, a trained diagonal reweighting,
+  and a learned abstention rule so it is not a straw man.
+
+Qwen3-VL's own vision tower *is* SigLIP-2, so both arms see the pixels through
+the same kind of encoder.
+
+**Why caching the backbone is legitimate here.** With the vision tower and the
+language model both frozen, the hidden state at an option position is a fixed
+function of the input, so it is computed once and the probe trains on the saved
+vectors in seconds. The cost is that nothing below the probe can learn;
+unfreezing the merger is the next step up and needs a real GPU.
+
+`tests/test_vision_mask.py` checks the part that would invalidate everything
+else if it were wrong: that the 4D block mask is actually applied, that the
+state block's hidden states do not move when the question changes, and that a
+globally-bidirectional control *does* move them. It runs on a randomly
+initialised tiny model in seconds and needs no weights.
+
+    state drift when the question changes     0.000e+00
+    same test, globally bidirectional mask    5.480e-01
+
+Bit-identical, and the control moves, so the mask is what is doing it. The
+tiny model sets `deepstack_visual_indexes`, so DeepStack injection runs during
+that test: injecting multi-level ViT features into the first three LLM layers
+does **not** break the state's question-independence, because what is injected
+depends only on the image.
+
+**Status: nothing here has been trained.** The mechanism is verified and the
+experiment is specified; the feature-extraction pass wants a GPU and the quota
+request is still open. No numbers in this section, because there are none
+yet.
+
 ## Data
 
 | Corpus | Labels | Role |
