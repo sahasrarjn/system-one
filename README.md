@@ -31,10 +31,16 @@ Train, then produce the deliverable:
 
 ## How it works
 
-**No `lm_head`.** We load `AutoModel`, not `AutoModelForCausalLM`. For
-Qwen3-0.6B that drops a 1024 × 151936 = 156M-parameter output projection —
-about a quarter of the model — that we would otherwise run once per generated
-token. `transformers` confirms it on load: `lm_head.weight | UNEXPECTED`.
+**No `lm_head`.** We load `AutoModel`, not `AutoModelForCausalLM`, so the
+vocabulary projection is never built and never run. For Qwen3-0.6B that skips a
+1024 × 151936 matmul at every position, which a decoder pays once per generated
+token. `transformers` confirms the drop on load: `lm_head.weight | UNEXPECTED`.
+
+This is a compute saving, not a memory one. `tie_word_embeddings` is true for
+Qwen3-0.6B, so that matrix is the input embedding table reused transposed. We
+still need it to embed tokens, so dropping the output projection frees no
+parameters. (It is a real 622M-parameter saving on models that do not tie, such
+as Qwen3-VL-8B.)
 
 **A shared `d → 1` probe**, not `d → k`. Parameters are independent of the
 option count, which is what lets the option set change per request. The entire

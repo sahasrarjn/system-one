@@ -11,8 +11,10 @@ class SystemOne(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         # AutoModel, not AutoModelForCausalLM: this is how lm_head is dropped.
-        # For Qwen3-0.6B that is a 1024 x 151936 = 156M-param projection we
-        # never build and never run.
+        # For Qwen3-0.6B that skips a 1024 x 151936 matmul at every position.
+        # Compute only, not memory: tie_word_embeddings is true for this model,
+        # so that matrix is embed_tokens reused transposed and stays resident
+        # either way.
         self.backbone = AutoModel.from_pretrained(
             cfg.model_name, dtype=cfg.torch_dtype(),
             attn_implementation=cfg.attn_impl,
