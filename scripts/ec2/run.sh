@@ -25,7 +25,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-MYIP=$(curl -s --max-time 10 https://checkip.amazonaws.com | tr -d '\n')
+# checkip.amazonaws.com is not always reachable; try a few and fail loudly
+# rather than silently proceeding with an empty CIDR. An earlier version let
+# `set -e` kill the script here, which looked exactly like a clean no-op run.
+MYIP=""
+for SVC in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com https://checkip.amazonaws.com; do
+  MYIP=$(curl -s --max-time 8 "$SVC" 2>/dev/null | tr -d '[:space:]' || true)
+  if [[ "$MYIP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; fi
+  MYIP=""
+done
+if [ -z "$MYIP" ]; then echo "!! could not determine public IP; refusing to launch"; exit 1; fi
+echo "--> my ip $MYIP"
 SG=$(aws ec2 describe-security-groups --region "$REG" --group-names systemone-sg \
        --query 'SecurityGroups[0].GroupId' --output text)
 aws ec2 authorize-security-group-ingress --region "$REG" --group-id "$SG" \

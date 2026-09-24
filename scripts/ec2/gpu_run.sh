@@ -19,16 +19,30 @@ IID=""
 STAMP=$(date +%Y%m%d-%H%M%S)
 
 cleanup() {
+  RC=$?
+  if [ $RC -ne 0 ]; then echo "--> exiting with status $RC"; fi
   if [ -n "$IID" ]; then
     echo "--> terminating $IID"
     aws ec2 terminate-instances --region "$REG" --instance-ids "$IID" >/dev/null 2>&1 || true
     aws ec2 wait instance-terminated --region "$REG" --instance-ids "$IID" 2>/dev/null || true
     echo "--> terminated $IID"
+  else
+    echo "--> no instance was launched"
   fi
 }
 trap cleanup EXIT INT TERM
 
-MYIP=$(curl -s --max-time 10 https://checkip.amazonaws.com | tr -d '\n')
+# checkip.amazonaws.com is not always reachable; try a few and fail loudly
+# rather than silently proceeding with an empty CIDR. An earlier version let
+# `set -e` kill the script here, which looked exactly like a clean no-op run.
+MYIP=""
+for SVC in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com https://checkip.amazonaws.com; do
+  MYIP=$(curl -s --max-time 8 "$SVC" 2>/dev/null | tr -d '[:space:]' || true)
+  if [[ "$MYIP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; fi
+  MYIP=""
+done
+if [ -z "$MYIP" ]; then echo "!! could not determine public IP; refusing to launch"; exit 1; fi
+echo "--> my ip $MYIP"
 SG=$(aws ec2 describe-security-groups --region "$REG" --group-names systemone-sg \
        --query 'SecurityGroups[0].GroupId' --output text)
 aws ec2 authorize-security-group-ingress --region "$REG" --group-id "$SG" \
@@ -55,14 +69,37 @@ chown -R ec2-user:ec2-user /opt/so
 touch /tmp/SETUP_DONE
 UDEOF
 
-echo "--> launching $TYPE in $REG (hard shutdown in ${MAXMIN}m)"
-IID=$(aws ec2 run-instances --region "$REG" --image-id "$AMI" --instance-type "$TYPE" \
-  --key-name systemone-ec2 --security-group-ids "$SG" \
-  --instance-initiated-shutdown-behavior terminate \
-  --user-data "file://$UD" \
-  --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=100,VolumeType=gp3,DeleteOnTermination=true}' \
-  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=systemone-gpu},{Key=ephemeral,Value=true}]' \
-  --query 'Instances[0].InstanceId' --output text)
+# InsufficientInstanceCapacity is common for GPU types and is per-AZ, not
+# regional. Walk a preference list of (type, AZ) rather than taking one shot.
+# g4dn is deliberately absent: the T4 is Turing and has no native bf16.
+TYPES="$TYPE g5.2xlarge g6.xlarge g5.xlarge g6e.xlarge"
+AZS="us-east-1a us-east-1b us-east-1c us-east-1d us-east-1f"
+
+echo "--> launching (hard shutdown in ${MAXMIN}m); trying types: $TYPES"
+for T in $TYPES; do
+  for AZ in $AZS; do
+    SN=$(aws ec2 describe-subnets --region "$REG" \
+      --filters "Name=default-for-az,Values=true" "Name=availability-zone,Values=$AZ" \
+      --query 'Subnets[0].SubnetId' --output text 2>/dev/null)
+    [ "$SN" = "None" ] || [ -z "$SN" ] && continue
+    IID=$(aws ec2 run-instances --region "$REG" --image-id "$AMI" --instance-type "$T" \
+      --key-name systemone-ec2 --security-group-ids "$SG" --subnet-id "$SN" \
+      --instance-initiated-shutdown-behavior terminate \
+      --user-data "file://$UD" \
+      --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=100,VolumeType=gp3,DeleteOnTermination=true}' \
+      --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=systemone-gpu},{Key=ephemeral,Value=true}]' \
+      --query 'Instances[0].InstanceId' --output text 2>/dev/null) || IID=""
+    if [ -n "$IID" ] && [ "$IID" != "None" ]; then
+      TYPE="$T"
+      echo "--> got $T in $AZ: $IID"
+      break 2
+    fi
+    IID=""
+    printf "    no capacity: %-14s %s\n" "$T" "$AZ"
+  done
+done
+if [ -z "$IID" ]; then echo "!! no GPU capacity in any tried type/AZ"; exit 1; fi
+
 aws ec2 wait instance-running --region "$REG" --instance-ids "$IID"
 DNS=$(aws ec2 describe-instances --region "$REG" --instance-ids "$IID" \
   --query 'Reservations[0].Instances[0].PublicDnsName' --output text)
