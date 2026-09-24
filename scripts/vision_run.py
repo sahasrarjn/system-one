@@ -161,6 +161,20 @@ class CrossHead(torch.nn.Module):
         return logits.masked_fill(~slot_mask, -1e4)
 
 
+def _bi_cos(d):
+    """Image-to-label similarity for the bi-encoder arm.
+
+    Both embedding sets are already L2-normalised in vision/baseline.py, so the
+    dot product IS the cosine. Returns the raw img/txt tensors too, because the
+    diagonal-reweighting head needs the vectors rather than just the score.
+    """
+    img = torch.from_numpy(d["img_emb"])
+    lab = torch.from_numpy(d["lab_emb"])
+    ix = torch.from_numpy(d["opt_ix"]).clamp(min=0)
+    txt = lab[ix]                                          # [N, K, dim]
+    return (img[:, None, :] * txt).sum(-1), img, txt
+
+
 def train(args):
     full, test = _load("trainval"), _load("test")
     tr, va = _split(full)
