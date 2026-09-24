@@ -36,8 +36,13 @@ class VisionConfig:
     cache_dir: str = "artifacts/vision"
 
     def torch_dtype(self):
-        if self.device == "mps" and self.dtype == "bfloat16":
-            return torch.float16       # MPS bf16 support is patchy; fp16 is safe here
+        # bf16 needs Ampere or newer on CUDA, and MPS support for it is patchy.
+        # Fall back to fp16 rather than silently running emulated bf16.
+        if self.dtype == "bfloat16":
+            if self.device == "mps":
+                return torch.float16
+            if self.device == "cuda" and not torch.cuda.is_bf16_supported():
+                return torch.float16
         return getattr(torch, self.dtype)
 
     def resolved(self):

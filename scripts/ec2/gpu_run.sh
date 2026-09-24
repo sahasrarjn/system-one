@@ -135,8 +135,13 @@ echo "--> remote exited $RC"
 
 echo "--> fetching results"
 mkdir -p "artifacts/ec2-$STAMP"
+# text results live in artifacts/runs, vision results in artifacts/vision.
+# Skip the vision .npz feature caches: they are hundreds of MB and trivially
+# regenerated, while the json/pt outputs are what carry the findings.
 scp "${SSHO[@]}" -qr ec2-user@"$DNS":'~/work/artifacts/runs' "artifacts/ec2-$STAMP/" 2>/dev/null || \
   echo "   (no runs directory to fetch)"
+ssh "${SSHO[@]}" ec2-user@"$DNS" "cd ~/work && tar czf - artifacts/vision/*.json artifacts/vision/*.pt 2>/dev/null" \
+  | tar xzf - -C "artifacts/ec2-$STAMP" 2>/dev/null || echo "   (no vision results to fetch)"
 ssh "${SSHO[@]}" ec2-user@"$DNS" "cd ~/work && tail -200 train.log" \
   > "artifacts/ec2-$STAMP/train.log" 2>/dev/null || true
 echo "--> results in artifacts/ec2-$STAMP"
