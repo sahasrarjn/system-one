@@ -15,6 +15,11 @@ QUESTION_TEXT = {
 class DecisionDataset(Dataset):
     def __init__(self, path, tokenizer, cfg, shuffle_options=True):
         self.items = []
+        # Parallel list, same order. A blended corpus makes a single accuracy
+        # number ambiguous: a binary task with a skewed prior can carry the
+        # headline while a 13-option task learns nothing. Evaluation needs to
+        # be able to split them.
+        self.sources = []
         self.tok, self.cfg = tokenizer, cfg
         self.shuffle_options = shuffle_options
         with open(path) as f:
@@ -22,6 +27,7 @@ class DecisionDataset(Dataset):
                 r = Record.from_json(line)
                 for q in r.questions:
                     self.items.append((r.state, q))
+                    self.sources.append(r.source)
 
     def __len__(self):
         return len(self.items)

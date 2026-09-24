@@ -28,6 +28,21 @@ def main():
     d = np.load(args.preds)
     p, c, k = d["p_top"], d["correct"], d["conf"]
 
+    # Per-source breakdown first: the blended number is the least informative
+    # one when the corpora have different arities and different base rates.
+    if "source" in d:
+        src, ar = d["source"], d.get("arity")
+        print(f"\n  {'subset':<18}{'n':>7}{'arity':>8}{'acc':>8}{'ECE':>8}{'Brier':>8}")
+        print("  " + "-" * 57)
+        for name in ["ALL"] + sorted(set(src.tolist())):
+            m = np.ones(len(src), bool) if name == "ALL" else (src == name)
+            if m.sum() < 20:
+                continue
+            a = f"{ar[m].min()}-{ar[m].max()}" if ar is not None else "?"
+            print(f"  {name:<18}{m.sum():>7,}{a:>8}{c[m].mean():>8.3f}"
+                  f"{ece(p[m], c[m], args.bins):>8.3f}"
+                  f"{np.mean((p[m]-c[m])**2):>8.3f}")
+
     pts = reliability(p, c, args.bins)
     dec = brier_decomposition(p, c, args.bins)
     out = {

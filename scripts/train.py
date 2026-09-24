@@ -146,7 +146,10 @@ def main():
     # a smoke run should not pay for a full-val pass at the end
     p, c, k, nll = evaluate(model, dv, dev, amp,
                             args.eval_batches if args.limit_steps else 0)
-    np.savez(f"{args.out}/val_preds.npz", p_top=p, correct=c, conf=k)
+    # val loader is unshuffled, so dataset order lines up with prediction order
+    np.savez(f"{args.out}/val_preds.npz", p_top=p, correct=c, conf=k,
+             source=np.array(va.sources[:len(p)]),
+             arity=np.array([len(va.items[i][1].options) for i in range(len(p))]))
     hist.append({"step": step, "val_nll": nll, "val_acc": float(c.mean()),
                  "final": True})
     json.dump(hist, open(f"{args.out}/history.json", "w"), indent=2)
