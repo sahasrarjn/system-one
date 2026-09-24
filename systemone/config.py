@@ -5,7 +5,12 @@ from dataclasses import dataclass, field
 class Config:
     # --- model ---
     model_name: str = "Qwen/Qwen3-0.6B"
-    dtype: str = "bfloat16"
+    dtype: str = "bfloat16"           # weights dtype for INFERENCE
+    # Training keeps fp32 master weights and does the compute in bf16 under
+    # autocast. AdamW updates on bf16 parameters lose too much of the update
+    # to rounding: the second moment is fine, the weight delta is not.
+    load_dtype: str = ""              # "" -> dtype; training sets float32
+    amp_dtype: str = "bfloat16"
     device: str = "auto"              # auto -> cuda | mps | cpu
     attn_impl: str = "sdpa"           # "eager" is slower but most predictable
 
@@ -43,4 +48,16 @@ class Config:
 
     def torch_dtype(self):
         import torch
-        return getattr(torch, self.dtype)
+        return getattr(torch, self.load_dtype or self.dtype)
+
+    def torch_amp_dtype(self):
+        import torch
+        return getattr(torch, self.amp_dtype)
+
+    def amp_ok(self, dev: str) -> bool:
+        """bf16 autocast needs Ampere or newer. A T4 is Turing and will either
+        fall over or emulate at a crawl, so check rather than assume."""
+        import torch
+        if dev != "cuda":
+            return False
+        return torch.cuda.is_bf16_supported()

@@ -13,19 +13,36 @@ def to_device(batch, dev):
 
 
 @torch.no_grad()
-def evaluate(model, loader, dev):
+def evaluate(model, loader, dev, amp=None, max_batches=0):
     model.eval()
-    P, C, K = [], [], []
-    for batch in loader:
+    P, C, K, NLL, n = [], [], [], 0.0, 0
+    for i, batch in enumerate(loader):
+        if max_batches and i >= max_batches:
+            break
         b = to_device(batch, dev)
-        logits = model(**b)
-        p = torch.softmax(logits.float(), -1)
-        pred, gold = p.argmax(-1), b["target"].argmax(-1)
+        with torch.autocast(dev, dtype=amp) if amp else _null():
+            logits = model(**b)
+        sm = b["slot_mask"]
+        logits = logits.float().masked_fill(~sm, -1e9)
+        p = torch.softmax(logits, -1)
+        gold = b["target"].argmax(-1)
+        lp = torch.log_softmax(logits, -1)
+        NLL += -lp.gather(-1, gold[:, None]).squeeze(-1).sum().item()
+        n += len(gold)
         P.append(p.max(-1).values.cpu().numpy())
-        C.append((pred == gold).float().cpu().numpy())
+        C.append((p.argmax(-1) == gold).float().cpu().numpy())
         K.append(confidence(p).cpu().numpy())
     model.train()
-    return np.concatenate(P), np.concatenate(C), np.concatenate(K)
+    return (np.concatenate(P), np.concatenate(C), np.concatenate(K),
+            NLL / max(1, n))
+
+
+import contextlib
+
+
+@contextlib.contextmanager
+def _null():
+    yield
 
 
 def main():
@@ -36,16 +53,25 @@ def main():
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--lr", type=float, default=2e-5)
     ap.add_argument("--max-state-tokens", type=int, default=512)
+    ap.add_argument("--grad-accum", type=int, default=4)
+    ap.add_argument("--eval-every", type=int, default=500)
+    ap.add_argument("--eval-batches", type=int, default=120,
+                    help="batches per mid-run eval; 0 = whole val set")
     ap.add_argument("--limit-steps", type=int, default=0, help="smoke test")
     ap.add_argument("--no-save", action="store_true", help="skip writing weights")
     args = ap.parse_args()
 
     cfg = Config(lr=args.lr, epochs=args.epochs, batch_size=args.batch_size,
-                 max_state_tokens=args.max_state_tokens)
+                 max_state_tokens=args.max_state_tokens,
+                 grad_accum=args.grad_accum, load_dtype="float32")
     dev = cfg.resolve_device()
+    amp = cfg.torch_amp_dtype() if cfg.amp_ok(dev) else None
     torch.manual_seed(cfg.seed); random.seed(cfg.seed)
     os.makedirs(args.out, exist_ok=True)
-    print(f"device={dev} dtype={cfg.dtype} model={cfg.model_name}")
+    print(f"device={dev} weights=float32 autocast={amp} model={cfg.model_name}")
+    if dev == "cuda" and amp is None:
+        print("  WARNING: bf16 autocast unavailable on this GPU (pre-Ampere); "
+              "running fp32, which will be slow")
 
     tok = load_tokenizer(cfg)
     model = SystemOne(cfg).to(dev)
@@ -63,40 +89,71 @@ def main():
 
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
                             weight_decay=cfg.weight_decay)
-    total = len(dl) * cfg.epochs if not args.limit_steps else args.limit_steps
+    total = (len(dl) * cfg.epochs // cfg.grad_accum) if not args.limit_steps \
+        else args.limit_steps
     warm = max(1, int(total * cfg.warmup_ratio))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: (
         s / warm if s < warm
         else 0.5 * (1 + math.cos(math.pi * (s - warm) / max(1, total - warm)))))
 
-    step, t0 = 0, time.time()
+    step, t0, best = 0, time.time(), float("inf")
+    micro = 0
+    hist = []
     for ep in range(cfg.epochs):
         for batch in dl:
-            loss, parts = decision_loss(model(**to_device(batch, dev)),
-                                        to_device(batch, dev)["target"],
-                                        batch["slot_mask"].to(dev),
+            b = to_device(batch, dev)
+            with torch.autocast(dev, dtype=amp) if amp else _null():
+                logits = model(**b)
+            loss, parts = decision_loss(logits, b["target"], b["slot_mask"],
                                         cfg.brier_weight)
-            loss.backward()
+            (loss / cfg.grad_accum).backward()
+            micro += 1
+            if micro % cfg.grad_accum:
+                continue
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); sched.step(); opt.zero_grad(set_to_none=True)
             step += 1
+
             if step % 20 == 0:
                 print(f"ep{ep} step {step}/{total} loss {loss.item():.4f} "
                       f"ce {parts['ce']:.4f} brier {parts['brier']:.4f} "
                       f"({(time.time()-t0)/step:.2f}s/step)", flush=True)
+
+            if args.eval_every and step % args.eval_every == 0:
+                _, c, _, nll = evaluate(model, dv, dev, amp, args.eval_batches)
+                hist.append({"step": step, "val_nll": nll, "val_acc": float(c.mean())})
+                flag = ""
+                if nll < best:
+                    best = nll
+                    flag = "  <- best"
+                    if not args.no_save:
+                        torch.save({"head": model.head.state_dict(),
+                                    "step": step, "val_nll": nll},
+                                   f"{args.out}/best_head.pt")
+                print(f"  [eval] step {step}  val nll {nll:.4f}  "
+                      f"acc {c.mean():.3f}{flag}", flush=True)
+                json.dump(hist, open(f"{args.out}/history.json", "w"), indent=2)
+
             if args.limit_steps and step >= args.limit_steps:
                 break
         if args.limit_steps and step >= args.limit_steps:
             break
 
-    p, c, k = evaluate(model, dv, dev)
+    # a smoke run should not pay for a full-val pass at the end
+    p, c, k, nll = evaluate(model, dv, dev, amp,
+                            args.eval_batches if args.limit_steps else 0)
     np.savez(f"{args.out}/val_preds.npz", p_top=p, correct=c, conf=k)
+    hist.append({"step": step, "val_nll": nll, "val_acc": float(c.mean()),
+                 "final": True})
+    json.dump(hist, open(f"{args.out}/history.json", "w"), indent=2)
     if not args.no_save:
         torch.save({"head": model.head.state_dict(), "cfg": cfg.__dict__},
                    f"{args.out}/head.pt")
         model.backbone.save_pretrained(f"{args.out}/backbone")
         tok.save_pretrained(f"{args.out}/backbone")
-    print(f"val acc {c.mean():.3f}  |  preds -> {args.out}/val_preds.npz")
+    print(f"val acc {c.mean():.3f}  nll {nll:.4f}  |  "
+          f"preds -> {args.out}/val_preds.npz")
 
 
 if __name__ == "__main__":
