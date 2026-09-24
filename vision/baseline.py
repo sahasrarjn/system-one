@@ -40,7 +40,10 @@ class SiglipFeatures:
         px = self.processor(images=list(images), return_tensors="pt")
         px = {k: v.to(self.cfg.device, self.cfg.torch_dtype())
               for k, v in px.items()}
-        e = self.model.get_image_features(**px).float()
+        # transformers 5.x returns BaseModelOutputWithPooling here, not a
+        # tensor. pooler_output is SigLIP's actual embedding (it uses an
+        # attention-pooling head rather than a CLS token).
+        e = self.model.get_image_features(**px).pooler_output.float()
         return torch.nn.functional.normalize(e, dim=-1).cpu()
 
     @torch.no_grad()
@@ -49,7 +52,7 @@ class SiglipFeatures:
         tk = self.processor(text=text, padding="max_length", truncation=True,
                             return_tensors="pt")
         tk = {k: v.to(self.cfg.device) for k, v in tk.items()}
-        e = self.model.get_text_features(**tk).float()
+        e = self.model.get_text_features(**tk).pooler_output.float()
         return torch.nn.functional.normalize(e, dim=-1).cpu()
 
 
