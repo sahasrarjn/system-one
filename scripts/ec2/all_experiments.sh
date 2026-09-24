@@ -9,6 +9,7 @@ PY=/opt/so/bin/python
 export PYTHONPATH=.
 export HF_HUB_DISABLE_PROGRESS_BARS=1
 export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p artifacts/runs
 
 stage() { echo; echo "================= $* ================="; date -u +"  %H:%M:%SZ"; }
@@ -55,14 +56,17 @@ run text-data $PY scripts/build_data.py --clinc-n 20000 --civil-n 40000 \
 
 stage 6 "text: smoke (30 steps)"
 run text-smoke $PY scripts/train.py --data-dir artifacts/data --out artifacts/runs/smoke \
-  --limit-steps 30 --eval-every 0 --batch-size 32 --grad-accum 1 --no-save
+  --limit-steps 30 --eval-every 0 --batch-size 16 --grad-accum 2 \
+  --grad-checkpointing --no-save
 
 stage 7 "text: full train"
-# Both corpora are short-utterance, so sequences run ~60-100 tokens rather than
-# the 512 budgeted for CFPB narratives. That affords a much larger batch.
+# Short sequences do NOT license a big batch here. The explicit 4D block mask
+# makes attention materialise B x heads x T x T per layer, so batch multiplies
+# a quadratic term 28 times over; batch 32 at T=260 exhausted 22GiB. Batch 16
+# with gradient checkpointing, same effective batch via accumulation.
 run text-train $PY scripts/train.py --data-dir artifacts/data --out artifacts/runs/run1 \
-  --epochs 2 --batch-size 32 --grad-accum 1 --lr 3e-5 --max-state-tokens 256 \
-  --eval-every 200 --eval-batches 60
+  --epochs 2 --batch-size 16 --grad-accum 2 --lr 3e-5 --max-state-tokens 256 \
+  --grad-checkpointing --eval-every 200 --eval-batches 60
 
 stage 8 "text: reliability"
 run text-eval $PY scripts/evaluate.py --preds artifacts/runs/run1/val_preds.npz

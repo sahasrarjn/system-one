@@ -54,6 +54,8 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-5)
     ap.add_argument("--max-state-tokens", type=int, default=512)
     ap.add_argument("--grad-accum", type=int, default=4)
+    ap.add_argument("--grad-checkpointing", action="store_true",
+                    help="trade ~30%% speed for a large drop in activation memory")
     ap.add_argument("--eval-every", type=int, default=500)
     ap.add_argument("--eval-batches", type=int, default=120,
                     help="batches per mid-run eval; 0 = whole val set")
@@ -63,7 +65,8 @@ def main():
 
     cfg = Config(lr=args.lr, epochs=args.epochs, batch_size=args.batch_size,
                  max_state_tokens=args.max_state_tokens,
-                 grad_accum=args.grad_accum, load_dtype="float32")
+                 grad_accum=args.grad_accum, load_dtype="float32",
+                 grad_checkpointing=args.grad_checkpointing)
     dev = cfg.resolve_device()
     amp = cfg.torch_amp_dtype() if cfg.amp_ok(dev) else None
     torch.manual_seed(cfg.seed); random.seed(cfg.seed)

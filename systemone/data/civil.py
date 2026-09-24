@@ -10,13 +10,21 @@ budget. Do NOT threshold it to a boolean - the float is the point.
 from .schema import Record, Question
 
 
-def load(n: int = 40_000, split: str = "train"):
+def load(n: int = 40_000, split: str = "train", *, seed: int = 0):
+    """Not streaming, for two reasons. Abandoning a streaming generator part
+    way leaves a background reader that aborts the interpreter at exit
+    ("PyGILState_Release: auto-releasing thread-state"), which fails the stage
+    after its work is already done. And a materialised split can be shuffled,
+    so `n` is a sample rather than whatever happens to sit at the top of the
+    file."""
     from datasets import load_dataset
-    ds = load_dataset("google/civil_comments", split=split, streaming=True)
+
+    # shuffle().select() keeps access sequential over the arrow file; indexing
+    # a shuffled list row by row would be random I/O over ~1.8M rows.
+    ds = load_dataset("google/civil_comments", split=split)
+    ds = ds.shuffle(seed=seed).select(range(min(n, len(ds))))
 
     for i, row in enumerate(ds):
-        if i >= n:
-            break
         text = " ".join(str(row["text"]).split())
         if len(text) < 20:
             continue
