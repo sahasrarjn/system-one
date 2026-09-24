@@ -17,8 +17,11 @@ run() { name="$1"; shift; if "$@"; then ok+=("$name"); else bad+=("$name"); echo
 
 stage 0 environment
 $PY - <<'EOF'
-import torch, transformers
-print("torch", torch.__version__, "| transformers", transformers.__version__)
+# Import everything the run needs up front. A missing package should fail here
+# in two seconds, not three stages and one model download later.
+import torch, transformers, torchvision, numpy, pandas, datasets, PIL
+print("torch", torch.__version__, "| transformers", transformers.__version__,
+      "| torchvision", torchvision.__version__)
 assert torch.cuda.is_available(), "no GPU visible"
 print("gpu:", torch.cuda.get_device_name(0),
       "| bf16:", torch.cuda.is_bf16_supported(),

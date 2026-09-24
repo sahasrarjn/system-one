@@ -64,7 +64,11 @@ dnf -y install python3.11 python3.11-pip git unzip
 python3.11 -m venv /opt/so
 /opt/so/bin/pip install --quiet --upgrade pip
 /opt/so/bin/pip install --quiet torch --index-url https://download.pytorch.org/whl/cu128
-/opt/so/bin/pip install --quiet 'transformers==5.17.0' numpy pandas datasets accelerate
+# torchvision is NOT optional: the Qwen3-VL AutoProcessor pulls in its
+# video processor, and the Pets loader uses torchvision.datasets. Its
+# absence took out all four vision stages on the first GPU run.
+/opt/so/bin/pip install --quiet torchvision --index-url https://download.pytorch.org/whl/cu128
+/opt/so/bin/pip install --quiet 'transformers==5.17.0' numpy pandas datasets accelerate pillow
 chown -R ec2-user:ec2-user /opt/so
 touch /tmp/SETUP_DONE
 UDEOF
