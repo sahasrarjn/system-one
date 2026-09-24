@@ -7,8 +7,7 @@ from .schema import Record
 from ..model.packing import pack_one, collate
 
 QUESTION_TEXT = {
-    "product": "Which financial product is this complaint about?",
-    "company_response": "How did the company close this complaint?",
+    "intent": "What is the user asking for?",
     "toxic": "Would a reader consider this comment toxic?",
 }
 

@@ -2,14 +2,13 @@
 import argparse, random, os
 
 from systemone.config import Config
-from systemone.data import cfpb, civil
+from systemone.data import civil, clinc
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cfpb-csv", help="path to complaints.csv (optional)")
+    ap.add_argument("--clinc-n", type=int, default=20_000)
     ap.add_argument("--civil-n", type=int, default=40_000)
-    ap.add_argument("--per-product", type=int, default=3000)
     ap.add_argument("--out-dir", default="artifacts/data")
     ap.add_argument("--val-frac", type=float, default=0.1)
     args = ap.parse_args()
@@ -17,10 +16,10 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     records = []
 
-    if args.cfpb_csv:
-        print("loading CFPB (stratified by product)...")
-        records += list(cfpb.load(args.cfpb_csv, args.per_product))
-        print(f"  {len(records):,} complaints")
+    if args.clinc_n:
+        print("loading CLINC150 (150 intents + out-of-scope)...")
+        records += list(clinc.load(args.clinc_n))
+        print(f"  {len(records):,} utterances")
 
     print("loading Civil Comments (human annotator fractions)...")
     before = len(records)

@@ -45,30 +45,29 @@ stage 4 "vision: train probe + compare against bi-encoder"
 run vision-train $PY scripts/vision_run.py train
 
 # ------------------------------------------------------------------ then text
-stage 5 "text: corpora"
-if [ ! -f artifacts/data/complaints.csv ]; then
-  curl -sSL --retry 3 -o /tmp/ccdb.zip https://files.consumerfinance.gov/ccdb/complaints.csv.zip \
-    && unzip -o -q /tmp/ccdb.zip -d artifacts/data/ && rm -f /tmp/ccdb.zip
-fi
-ls -la artifacts/data/complaints.csv 2>/dev/null || echo "!! no CFPB csv"
+stage 5 "text: build dataset (CLINC150 + Civil Comments)"
+# CFPB is gone: as of Sep 2026 it publishes complaint metadata but no longer
+# the narratives, and the narrative was the document. CLINC150 replaces it and
+# is a better fit anyway: 150 intents rather than ten skewed products, and a
+# native out-of-scope class that gives the text side an abstention test.
+run text-data $PY scripts/build_data.py --clinc-n 20000 --civil-n 40000 \
+  --out-dir artifacts/data
 
-stage 6 "text: build dataset"
-run text-data $PY scripts/build_data.py --cfpb-csv artifacts/data/complaints.csv \
-  --per-product 3000 --civil-n 40000 --out-dir artifacts/data
-
-stage 7 "text: smoke (30 steps)"
+stage 6 "text: smoke (30 steps)"
 run text-smoke $PY scripts/train.py --data-dir artifacts/data --out artifacts/runs/smoke \
-  --limit-steps 30 --eval-every 0 --batch-size 8 --grad-accum 2 --no-save
+  --limit-steps 30 --eval-every 0 --batch-size 32 --grad-accum 1 --no-save
 
-stage 8 "text: full train"
+stage 7 "text: full train"
+# Both corpora are short-utterance, so sequences run ~60-100 tokens rather than
+# the 512 budgeted for CFPB narratives. That affords a much larger batch.
 run text-train $PY scripts/train.py --data-dir artifacts/data --out artifacts/runs/run1 \
-  --epochs 2 --batch-size 8 --grad-accum 2 --lr 2e-5 --max-state-tokens 512 \
-  --eval-every 400 --eval-batches 150
+  --epochs 2 --batch-size 32 --grad-accum 1 --lr 3e-5 --max-state-tokens 256 \
+  --eval-every 200 --eval-batches 60
 
-stage 9 "text: reliability"
+stage 8 "text: reliability"
 run text-eval $PY scripts/evaluate.py --preds artifacts/runs/run1/val_preds.npz
 
-stage 10 summary
+stage 9 summary
 echo "  succeeded: ${ok[*]:-none}"
 echo "  failed:    ${bad[*]:-none}"
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
