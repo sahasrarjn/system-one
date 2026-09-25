@@ -60,9 +60,46 @@ def pretty(name: str) -> str:
 # count changes.
 ARITY_LADDER = (4, 8, 16, 32, 64, 150)
 
+# Run 7 showed the arity ladder alone does not create difficulty: accuracy was
+# flat from 2 options to 151, and Brier resolution stayed at 0.006, barely
+# above the trivial task it replaced. Adding 147 obviously-wrong options does
+# not confuse a model any more than adding three. Difficulty lives in
+# CONFUSABILITY, not count.
+#
+# Rather than hardcode the published 10-domain grouping from memory, derive
+# near-neighbours from the utterances themselves: a tf-idf centroid per intent
+# and cosine between centroids. That measures what we actually want (which
+# intents look alike in practice) rather than a proxy for it, and it is
+# checkable. It recovers the domain structure and then some -- pto_request's
+# nearest neighbours come out as pto_request_status, pto_balance, pto_used.
+def confusability(ds, names, oos_id):
+    """[n_intents, n_intents] cosine between tf-idf centroids. Diagonal and
+    the out-of-scope row/column are set to -1 so they never rank as similar."""
+    import collections, re
+    import numpy as np
+
+    docs = collections.defaultdict(list)
+    for text, y in zip(ds["text"], ds["intent"]):
+        if y != oos_id:
+            docs[y].extend(re.findall(r"[a-z']+", text.lower()))
+    vocab = {w: i for i, w in enumerate(sorted({w for d in docs.values() for w in d}))}
+    M = np.zeros((len(names), len(vocab)), dtype=np.float32)
+    for y, words in docs.items():
+        for w in words:
+            M[y, vocab[w]] += 1.0
+    idf = np.log(len(docs) / np.maximum((M > 0).sum(0), 1))
+    M *= idf
+    M /= np.maximum(np.linalg.norm(M, axis=1, keepdims=True), 1e-9)
+    S = M @ M.T
+    np.fill_diagonal(S, -1.0)
+    S[oos_id, :] = -1.0
+    S[:, oos_id] = -1.0
+    return S
+
 
 def load(n: int = 20_000, split: str = "train", *, seed: int = 0,
-         ladder=ARITY_LADDER, p_none: float = 0.5):
+         ladder=ARITY_LADDER, p_none: float = 0.5, p_hard: float = 0.7,
+         hard_pool: int = 40):
     """One record per utterance, with an option subset that varies per record.
 
     For an in-scope utterance the true intent is always present, and a "none of
@@ -78,6 +115,10 @@ def load(n: int = 20_000, split: str = "train", *, seed: int = 0,
     oos_id = names.index(OOS)
     in_scope = [i for i in range(len(names)) if i != oos_id]
     rng = random.Random(seed)
+    import numpy as np
+    S = confusability(ds, names, oos_id)
+    nearest = {y: [int(j) for j in np.argsort(-S[y])[:hard_pool]]
+               for y in in_scope}
 
     # The published file is ordered by intent. Taking the first n rows yields
     # a handful of intents and, because the out-of-scope rows sit together, no
@@ -94,13 +135,24 @@ def load(n: int = 20_000, split: str = "train", *, seed: int = 0,
         y = row["intent"]
         k = min(rng.choice(ladder), len(in_scope))
 
+        mode = "abstain"
         if y == oos_id:
             opts = [pretty(names[j]) for j in rng.sample(in_scope, k)]
             opts.append(NONE_OPTION)
             rng.shuffle(opts)
             target = onehot(len(opts), opts.index(NONE_OPTION))
         else:
-            pool = [j for j in in_scope if j != y]
+            # hard: distractors drawn from this intent's nearest neighbours,
+            # which is where the model actually has to discriminate. easy:
+            # uniform over everything else, as before. Mixing the two is what
+            # produces a spread of difficulty, and a spread is what Brier
+            # resolution measures.
+            hard = rng.random() < p_hard and k - 1 <= hard_pool
+            pool = nearest[y] if hard else [j for j in in_scope if j != y]
+            if k - 1 >= len(pool):
+                pool = [j for j in in_scope if j != y]
+                hard = False
+            mode = "hard" if hard else "easy"
             opts = [pretty(names[j]) for j in rng.sample(pool, k - 1)]
             opts.append(pretty(names[y]))
             if rng.random() < p_none:
@@ -111,5 +163,6 @@ def load(n: int = 20_000, split: str = "train", *, seed: int = 0,
         yield Record(
             state_id=f"clinc:{split}:{i}", state=text, source="clinc150",
             questions=[Question(id="intent", type="choice", options=opts,
-                                target=target, label_source="native")],
+                                target=target,
+                                label_source=f"native/{mode}")],
         ).validate()

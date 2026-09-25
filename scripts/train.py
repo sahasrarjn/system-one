@@ -195,6 +195,7 @@ def main():
     # val loader is unshuffled, so dataset order lines up with prediction order
     np.savez(f"{args.out}/val_preds.npz", p_top=p, correct=c, conf=k,
              source=np.array(va.sources[:len(p)]),
+             mode=np.array(va.modes[:len(p)]),
              arity=np.array([len(va.items[i][1].options) for i in range(len(p))]))
     hist.append({"step": step, "val_nll": nll, "val_acc": float(c.mean()),
                  "final": True})

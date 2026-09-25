@@ -43,6 +43,22 @@ def main():
                   f"{ece(p[m], c[m], args.bins):>8.3f}"
                   f"{np.mean((p[m]-c[m])**2):>8.3f}")
 
+    # Per-mode: run 7 showed option COUNT does not drive difficulty. This
+    # splits on how the distractors were chosen, which should.
+    if "mode" in d:
+        md = d["mode"]
+        print(f"\n  {'distractors':<18}{'n':>7}{'acc':>8}{'ECE':>8}{'Brier':>8}"
+              f"{'resol':>8}")
+        print("  " + "-" * 57)
+        for name in sorted(set(md.tolist())):
+            m = md == name
+            if m.sum() < 30:
+                continue
+            bd = brier_decomposition(p[m], c[m], args.bins)
+            print(f"  {name:<18}{m.sum():>7,}{c[m].mean():>8.3f}"
+                  f"{ece(p[m], c[m], args.bins):>8.3f}{bd['brier']:>8.3f}"
+                  f"{bd['resolution']:>8.4f}")
+
     # Per-arity: the architecture's whole claim is that ONE shared probe stays
     # calibrated as the option count changes. That is only checkable by
     # splitting on the option count.

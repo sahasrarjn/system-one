@@ -20,6 +20,7 @@ class DecisionDataset(Dataset):
         # headline while a 13-option task learns nothing. Evaluation needs to
         # be able to split them.
         self.sources = []
+        self.modes = []
         self.tok, self.cfg = tokenizer, cfg
         self.shuffle_options = shuffle_options
         with open(path) as f:
@@ -28,6 +29,10 @@ class DecisionDataset(Dataset):
                 for q in r.questions:
                     self.items.append((r.state, q))
                     self.sources.append(r.source)
+                    # label_source carries "native/hard" etc; the suffix says
+                    # how the distractors were drawn, which is the variable
+                    # that actually moves difficulty.
+                    self.modes.append(q.label_source.split("/")[-1])
 
     def __len__(self):
         return len(self.items)
