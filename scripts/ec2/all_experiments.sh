@@ -60,17 +60,17 @@ run text-data $PY scripts/build_data.py --clinc-n 20000 --civil-n 16000 \
 
 stage 6 "text: smoke (30 steps)"
 run text-smoke $PY scripts/train.py --data-dir artifacts/data --out artifacts/runs/smoke \
-  --limit-steps 30 --eval-every 0 --batch-size 8 --grad-accum 4 \
+  --limit-steps 30 --eval-every 0 --max-tokens 2560 --grad-accum 4 \
   --grad-checkpointing --no-save
 
 stage 7 "text: full train"
-# The arity ladder pushes sequences to ~720 tokens at k=151, up from ~260. The
-# explicit 4D block mask makes attention materialise B x heads x T x T per
-# layer, so batch multiplies a quadratic term 28 times over and batch 32 at
-# T=260 already exhausted 22GiB. Batch 8 with gradient checkpointing,
-# accumulating to the same effective batch of 32.
+# Batches are sized by TOKENS, not by example count. Lengths span 49 tokens at
+# the median to 645 at the max, and a fixed batch size tuned on the average
+# dies on the tail: batch 8 trained twenty steps and then met a batch holding
+# several 151-option questions. A 2560-token budget peaks at roughly 47% of
+# the memory that failed, and lets short questions travel 40 at a time.
 run text-train $PY scripts/train.py --data-dir artifacts/data --out artifacts/runs/run1 \
-  --epochs 2 --batch-size 8 --grad-accum 4 --lr 3e-5 --max-state-tokens 256 \
+  --epochs 2 --max-tokens 2560 --grad-accum 4 --lr 3e-5 --max-state-tokens 256 \
   --grad-checkpointing --eval-every 150 --eval-batches 60
 
 stage 8 "text: reliability"

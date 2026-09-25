@@ -3,7 +3,8 @@ import numpy as np, torch
 from torch.utils.data import DataLoader
 
 from systemone.config import Config
-from systemone.data.dataset import DecisionDataset, make_collate
+from systemone.data.dataset import (DecisionDataset, make_collate,
+                                    TokenBudgetSampler)
 from systemone.model.systemone import SystemOne, load_tokenizer, confidence
 from systemone.model.losses import decision_loss
 
@@ -54,6 +55,8 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-5)
     ap.add_argument("--max-state-tokens", type=int, default=512)
     ap.add_argument("--grad-accum", type=int, default=4)
+    ap.add_argument("--max-tokens", type=int, default=0,
+                    help="token budget per batch; 0 uses a fixed batch size")
     ap.add_argument("--grad-checkpointing", action="store_true",
                     help="trade ~30%% speed for a large drop in activation memory")
     ap.add_argument("--eval-every", type=int, default=500)
@@ -86,9 +89,22 @@ def main():
     tr = DecisionDataset(f"{args.data_dir}/train.jsonl", tok, cfg)
     va = DecisionDataset(f"{args.data_dir}/val.jsonl", tok, cfg,
                          shuffle_options=False)
-    dl = DataLoader(tr, batch_size=cfg.batch_size, shuffle=True, collate_fn=coll)
-    dv = DataLoader(va, batch_size=cfg.batch_size, collate_fn=coll)
-    print(f"train {len(tr):,} questions | val {len(va):,}")
+    if args.max_tokens:
+        # Sequence length varies ~20x across the arity ladder, so a fixed batch
+        # size is sized for the average and OOMs on the tail.
+        strn, svan = (TokenBudgetSampler(d.approx_lengths(), args.max_tokens,
+                                         max_batch=64, seed=cfg.seed)
+                      for d in (tr, va))
+        dl = DataLoader(tr, batch_sampler=strn, collate_fn=coll)
+        dv = DataLoader(va, batch_sampler=svan, collate_fn=coll)
+        nb = len(strn)
+        print(f"train {len(tr):,} questions | val {len(va):,} | "
+              f"{nb:,} batches at <={args.max_tokens} tokens "
+              f"(mean {len(tr)/max(1,nb):.1f} examples)")
+    else:
+        dl = DataLoader(tr, batch_size=cfg.batch_size, shuffle=True, collate_fn=coll)
+        dv = DataLoader(va, batch_size=cfg.batch_size, collate_fn=coll)
+        print(f"train {len(tr):,} questions | val {len(va):,}")
 
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
                             weight_decay=cfg.weight_decay)
