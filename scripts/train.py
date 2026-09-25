@@ -55,8 +55,12 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-5)
     ap.add_argument("--max-state-tokens", type=int, default=512)
     ap.add_argument("--grad-accum", type=int, default=4)
+    ap.add_argument("--max-batch", type=int, default=16,
+                    help="hard cap on examples per batch, whatever the budget")
     ap.add_argument("--max-tokens", type=int, default=0,
                     help="token budget per batch; 0 uses a fixed batch size")
+    ap.add_argument("--freeze-embeddings", action="store_true",
+                    help="drop grads and Adam state for the (tied) embedding")
     ap.add_argument("--grad-checkpointing", action="store_true",
                     help="trade ~30%% speed for a large drop in activation memory")
     ap.add_argument("--eval-every", type=int, default=500)
@@ -93,7 +97,7 @@ def main():
         # Sequence length varies ~20x across the arity ladder, so a fixed batch
         # size is sized for the average and OOMs on the tail.
         strn, svan = (TokenBudgetSampler(d.approx_lengths(), args.max_tokens,
-                                         max_batch=64, seed=cfg.seed)
+                                         max_batch=args.max_batch, seed=cfg.seed)
                       for d in (tr, va))
         dl = DataLoader(tr, batch_sampler=strn, collate_fn=coll)
         dv = DataLoader(va, batch_sampler=svan, collate_fn=coll)
@@ -106,8 +110,22 @@ def main():
         dv = DataLoader(va, batch_size=cfg.batch_size, collate_fn=coll)
         print(f"train {len(tr):,} questions | val {len(va):,}")
 
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
+    if args.freeze_embeddings:
+        # embed_tokens is 151,936 x 1,024 = 26% of this model's parameters, and
+        # it is tied, so it is also the output projection. Freezing it drops its
+        # gradient and both Adam moments: ~1.9GB that a classification
+        # fine-tune has little use for.
+        model.backbone.get_input_embeddings().requires_grad_(False)
+    trainable = [q for q in model.parameters() if q.requires_grad]
+    opt = torch.optim.AdamW(trainable, lr=cfg.lr,
                             weight_decay=cfg.weight_decay)
+    n_train = sum(q.numel() for q in trainable)
+    print(f"trainable {n_train/1e6:.0f}M of "
+          f"{sum(q.numel() for q in model.parameters())/1e6:.0f}M params")
+    if dev == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+        print(f"  after model+optimiser setup: "
+              f"{torch.cuda.memory_allocated()/2**30:.2f} GiB resident")
     total = (len(dl) * cfg.epochs // cfg.grad_accum) if not args.limit_steps \
         else args.limit_steps
     warm = max(1, int(total * cfg.warmup_ratio))
@@ -135,9 +153,14 @@ def main():
             step += 1
 
             if step % 20 == 0:
+                mem = ""
+                if dev == "cuda":
+                    mem = (f" | mem {torch.cuda.memory_allocated()/2**30:.1f}"
+                           f"/{torch.cuda.max_memory_allocated()/2**30:.1f} GiB"
+                           f" B={b['input_ids'].shape[0]}xT={b['input_ids'].shape[1]}")
                 print(f"ep{ep} step {step}/{total} loss {loss.item():.4f} "
                       f"ce {parts['ce']:.4f} brier {parts['brier']:.4f} "
-                      f"({(time.time()-t0)/step:.2f}s/step)", flush=True)
+                      f"({(time.time()-t0)/step:.2f}s/step){mem}", flush=True)
 
             if args.eval_every and step % args.eval_every == 0:
                 _, c, _, nll = evaluate(model, dv, dev, amp, args.eval_batches)

@@ -60,17 +60,23 @@ run text-data $PY scripts/build_data.py --clinc-n 20000 --civil-n 16000 \
 
 stage 6 "text: smoke (30 steps)"
 run text-smoke $PY scripts/train.py --data-dir artifacts/data --out artifacts/runs/smoke \
-  --limit-steps 30 --eval-every 0 --max-tokens 2560 --grad-accum 4 \
-  --grad-checkpointing --no-save
+  --limit-steps 30 --eval-every 0 --max-tokens 1536 --max-batch 16 \
+  --grad-accum 4 --grad-checkpointing --freeze-embeddings --no-save
 
 stage 7 "text: full train"
-# Batches are sized by TOKENS, not by example count. Lengths span 49 tokens at
-# the median to 645 at the max, and a fixed batch size tuned on the average
-# dies on the tail: batch 8 trained twenty steps and then met a batch holding
-# several 151-option questions. A 2560-token budget peaks at roughly 47% of
-# the memory that failed, and lets short questions travel 40 at a time.
+# Batches are sized by TOKENS, not example count, because lengths span 49 at
+# the median to 645 at the max. But a token budget alone was not enough: run 6
+# still died around step 30 with 21.5GiB allocated, and my two theories for
+# where that went were both wrong. So this run is deliberately conservative AND
+# instrumented -- it prints resident and peak memory with the batch shape every
+# twenty steps, which will say what the arithmetic could not.
+#
+# Also freezing the embedding: 151,936 x 1,024 is 26% of this model, and its
+# gradient plus both Adam moments is ~1.9GiB a classification fine-tune has
+# little use for. The 28 transformer layers still adapt.
 run text-train $PY scripts/train.py --data-dir artifacts/data --out artifacts/runs/run1 \
-  --epochs 2 --max-tokens 2560 --grad-accum 4 --lr 3e-5 --max-state-tokens 256 \
+  --epochs 2 --max-tokens 1536 --max-batch 16 --grad-accum 4 --lr 3e-5 \
+  --max-state-tokens 256 --freeze-embeddings \
   --grad-checkpointing --eval-every 150 --eval-batches 60
 
 stage 8 "text: reliability"
