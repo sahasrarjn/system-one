@@ -87,6 +87,10 @@ IS_SPOT=0
 
 echo "--> launching (hard shutdown in ${MAXMIN}m); markets: $MARKETS"
 for MKT in $MARKETS; do
+  # NOTE: bash 3.2 (the macOS default) errors on "${arr[@]}" for an EMPTY
+  # array under `set -u`. The on-demand path uses an empty array, so the
+  # unguarded expansion turned all 25 on-demand attempts into false
+  # "no capacity" results. ${arr[@]+"${arr[@]}"} is the portable form.
   if [ "$MKT" = "spot" ]; then
     MKTOPT=(--instance-market-options MarketType=spot)
   else
@@ -100,7 +104,8 @@ for MKT in $MARKETS; do
       [ "$SN" = "None" ] || [ -z "$SN" ] && continue
       IID=$(aws ec2 run-instances --region "$REG" --image-id "$AMI" --instance-type "$T" \
         --key-name systemone-ec2 --security-group-ids "$SG" --subnet-id "$SN" \
-        --instance-initiated-shutdown-behavior terminate "${MKTOPT[@]}" \
+        --instance-initiated-shutdown-behavior terminate \
+        ${MKTOPT[@]+"${MKTOPT[@]}"} \
         --user-data "file://$UD" \
         --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=100,VolumeType=gp3,DeleteOnTermination=true}' \
         --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=systemone-gpu},{Key=ephemeral,Value=true}]' \
