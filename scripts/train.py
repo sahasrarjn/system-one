@@ -31,7 +31,7 @@ def evaluate(model, loader, dev, amp=None, max_batches=0):
         n += len(gold)
         P.append(p.max(-1).values.cpu().numpy())
         C.append((p.argmax(-1) == gold).float().cpu().numpy())
-        K.append(confidence(p).cpu().numpy())
+        K.append(confidence(p, sm.sum(-1)).cpu().numpy())
     model.train()
     return (np.concatenate(P), np.concatenate(C), np.concatenate(K),
             NLL / max(1, n))

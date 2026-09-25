@@ -61,15 +61,22 @@ class SystemOne(nn.Module):
         }
 
 
-def confidence(p: torch.Tensor) -> torch.Tensor:
+def confidence(p: torch.Tensor, n_options: torch.Tensor = None) -> torch.Tensor:
     """1 - normalised entropy. k-invariant, unlike max-probability:
-    0.5 is decisive in a binary and near-uniform across ten options."""
-    k = p.shape[-1]
-    if k < 2:
-        return torch.ones_like(p[..., 0])
+    0.5 is decisive in a binary and near-uniform across ten options.
+
+    `n_options` is the number of options ACTUALLY offered, per example. It is
+    not optional in batched use: p is padded to the widest example in the
+    batch, so p.shape[-1] is that width rather than this question's arity. A
+    two-option question in a batch that also holds a thirteen-option one would
+    be normalised by log(13), which destroys the k-invariance this function
+    exists to provide.
+    """
     H = -(p.clamp_min(1e-12) * p.clamp_min(1e-12).log()).sum(-1)
-    import math
-    return 1.0 - H / math.log(k)
+    if n_options is None:
+        n_options = torch.full(p.shape[:-1], p.shape[-1], device=p.device)
+    n = n_options.to(p.dtype).clamp(min=2.0)
+    return 1.0 - H / torch.log(n)
 
 
 def load_tokenizer(cfg):
