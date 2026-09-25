@@ -117,8 +117,15 @@ def main():
         # fine-tune has little use for.
         model.backbone.get_input_embeddings().requires_grad_(False)
     trainable = [q for q in model.parameters() if q.requires_grad]
+    # fused=True does the update in place with almost no scratch space.
+    # The default foreach=True path fuses across the parameter LIST instead,
+    # allocating temporaries proportional to total parameter size: measured at
+    # ~7GiB of transient peak on 440M fp32 params, on a batch of 1,488 tokens
+    # whose activations are a few hundred MB. That fixed spike, invisible to
+    # batch-size tuning, is what made three separate OOM diagnoses wrong.
     opt = torch.optim.AdamW(trainable, lr=cfg.lr,
-                            weight_decay=cfg.weight_decay)
+                            weight_decay=cfg.weight_decay,
+                            fused=(dev == "cuda"))
     n_train = sum(q.numel() for q in trainable)
     print(f"trainable {n_train/1e6:.0f}M of "
           f"{sum(q.numel() for q in model.parameters())/1e6:.0f}M params")
