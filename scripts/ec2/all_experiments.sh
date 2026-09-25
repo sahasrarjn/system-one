@@ -51,22 +51,27 @@ stage 5 "text: build dataset (CLINC150 + Civil Comments)"
 # the narratives, and the narrative was the document. CLINC150 replaces it and
 # is a better fit anyway: 150 intents rather than ten skewed products, and a
 # native out-of-scope class that gives the text side an abstention test.
-run text-data $PY scripts/build_data.py --clinc-n 20000 --civil-n 40000 \
+# Run 4 was 72% Civil Comments, a 2-option task with a skewed prior, which
+# meant a single accuracy figure could be carried almost entirely by the easy
+# half. Roughly equal now. Civil is still the calibration anchor, since its
+# targets are fractions of human annotators rather than one-hot labels.
+run text-data $PY scripts/build_data.py --clinc-n 20000 --civil-n 16000 \
   --out-dir artifacts/data
 
 stage 6 "text: smoke (30 steps)"
 run text-smoke $PY scripts/train.py --data-dir artifacts/data --out artifacts/runs/smoke \
-  --limit-steps 30 --eval-every 0 --batch-size 16 --grad-accum 2 \
+  --limit-steps 30 --eval-every 0 --batch-size 8 --grad-accum 4 \
   --grad-checkpointing --no-save
 
 stage 7 "text: full train"
-# Short sequences do NOT license a big batch here. The explicit 4D block mask
-# makes attention materialise B x heads x T x T per layer, so batch multiplies
-# a quadratic term 28 times over; batch 32 at T=260 exhausted 22GiB. Batch 16
-# with gradient checkpointing, same effective batch via accumulation.
+# The arity ladder pushes sequences to ~720 tokens at k=151, up from ~260. The
+# explicit 4D block mask makes attention materialise B x heads x T x T per
+# layer, so batch multiplies a quadratic term 28 times over and batch 32 at
+# T=260 already exhausted 22GiB. Batch 8 with gradient checkpointing,
+# accumulating to the same effective batch of 32.
 run text-train $PY scripts/train.py --data-dir artifacts/data --out artifacts/runs/run1 \
-  --epochs 2 --batch-size 16 --grad-accum 2 --lr 3e-5 --max-state-tokens 256 \
-  --grad-checkpointing --eval-every 200 --eval-batches 60
+  --epochs 2 --batch-size 8 --grad-accum 4 --lr 3e-5 --max-state-tokens 256 \
+  --grad-checkpointing --eval-every 150 --eval-batches 60
 
 stage 8 "text: reliability"
 run text-eval $PY scripts/evaluate.py --preds artifacts/runs/run1/val_preds.npz

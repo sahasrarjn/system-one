@@ -43,6 +43,25 @@ def main():
                   f"{ece(p[m], c[m], args.bins):>8.3f}"
                   f"{np.mean((p[m]-c[m])**2):>8.3f}")
 
+    # Per-arity: the architecture's whole claim is that ONE shared probe stays
+    # calibrated as the option count changes. That is only checkable by
+    # splitting on the option count.
+    if "arity" in d:
+        ar = d["arity"]
+        buckets = [(2, 2), (3, 8), (9, 20), (21, 48), (49, 96), (97, 999)]
+        print(f"\n  {'options':<18}{'n':>7}{'acc':>8}{'ECE':>8}{'conf':>8}"
+              f"{'resol':>8}")
+        print("  " + "-" * 57)
+        for lo, hi in buckets:
+            m = (ar >= lo) & (ar <= hi)
+            if m.sum() < 30:
+                continue
+            lab = f"{lo}" if lo == hi else f"{lo}-{min(hi, int(ar[m].max()))}"
+            bd = brier_decomposition(p[m], c[m], args.bins)
+            print(f"  {lab:<18}{m.sum():>7,}{c[m].mean():>8.3f}"
+                  f"{ece(p[m], c[m], args.bins):>8.3f}{k[m].mean():>8.3f}"
+                  f"{bd['resolution']:>8.4f}")
+
     pts = reliability(p, c, args.bins)
     dec = brier_decomposition(p, c, args.bins)
     out = {

@@ -47,8 +47,22 @@ def pretty(name: str) -> str:
     return name.replace("_", " ")
 
 
+# Arity ladder rather than a narrow random range. Run 4 sampled 4-13 options
+# out of 151 and produced a task the model found trivial: 97% accuracy, and a
+# Brier resolution of 0.006 against an uncertainty of 0.028, meaning the stated
+# confidence barely varied and carried almost no information. Both selective
+# prediction figures came out at 1.0, which is the metric saying nothing at all.
+#
+# Spanning 4 to the full 150 does two things. It restores a real difficulty
+# gradient, which is what resolution measures. And it turns the arity itself
+# into a variable we can report against, which tests the claim the whole
+# architecture rests on: that one shared probe stays calibrated as the option
+# count changes.
+ARITY_LADDER = (4, 8, 16, 32, 64, 150)
+
+
 def load(n: int = 20_000, split: str = "train", *, seed: int = 0,
-         k_min: int = 4, k_max: int = 12, p_none: float = 0.5):
+         ladder=ARITY_LADDER, p_none: float = 0.5):
     """One record per utterance, with an option subset that varies per record.
 
     For an in-scope utterance the true intent is always present, and a "none of
@@ -78,7 +92,7 @@ def load(n: int = 20_000, split: str = "train", *, seed: int = 0,
         if len(text) < 3:
             continue
         y = row["intent"]
-        k = rng.randint(k_min, k_max)
+        k = min(rng.choice(ladder), len(in_scope))
 
         if y == oos_id:
             opts = [pretty(names[j]) for j in rng.sample(in_scope, k)]
